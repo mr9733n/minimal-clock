@@ -1,3 +1,7 @@
+[workspace]
+members = [".", "crates/minimal-clock-core"]
+resolver = "2"
+
 [package]
 name = "minimal-clock"
 version = "0.2.0"
