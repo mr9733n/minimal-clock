@@ -8,6 +8,8 @@ use windows::{
     Win32::UI::WindowsAndMessaging::*,
 };
 use serde::{Deserialize, Serialize};
+use minimal_clock_core::{ClockCore, ClockCoreConfig, ClockSnapshot};
+use std::env;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -146,6 +148,33 @@ impl Config {
         self.save();
     }
 
+    fn load_quiet() -> Self {
+        match fs::read_to_string(Self::PATH) {
+            Ok(s) => {
+                let mut config: Config = serde_json::from_str(&s).unwrap_or_else(|_| Config::default());
+                let default_iana = Self::default_iana_timezones();
+                if config.iana_timezones.len() != default_iana.len() {
+                    config.iana_timezones = default_iana;
+                }
+                config
+            }
+            Err(_) => Config::default(),
+        }
+    }
+
+    fn to_core_config(&self) -> ClockCoreConfig {
+        ClockCoreConfig {
+            timezones: self.timezones.clone(),
+            providers: self.providers.iter().map(|provider| minimal_clock_core::ProviderConfig {
+                provider_type: provider.provider_type.clone(),
+                priority: provider.priority,
+                enabled: provider.enabled,
+                api_key: provider.api_key.clone(),
+            }).collect(),
+            iana_timezones: self.iana_timezones.clone(),
+            last_selected_timezone: self.last_selected_timezone.clone(),
+        }
+    }
     fn default_timezones() -> Vec<String> {
         vec![
             "Europe/Moscow".into(),
@@ -1211,7 +1240,127 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         _ => DefWindowProcW(hwnd, msg, wp, lp)
     }
 }
+#[derive(Default)]
+struct SnapshotArgs {
+    enabled: bool,
+    json: bool,
+    local: bool,
+    timezone: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SnapshotOutput {
+    ok: bool,
+    label: String,
+    text: String,
+    tooltip: String,
+    source: String,
+    timezone: Option<String>,
+    provider: Option<String>,
+    error: Option<String>,
+}
+
+impl SnapshotOutput {
+    fn error(message: String) -> Self {
+        Self {
+            ok: false,
+            label: "Clock".into(),
+            text: "Clock error".into(),
+            tooltip: message.clone(),
+            source: "error".into(),
+            timezone: None,
+            provider: None,
+            error: Some(message),
+        }
+    }
+}
+
+impl From<ClockSnapshot> for SnapshotOutput {
+    fn from(snapshot: ClockSnapshot) -> Self {
+        Self {
+            ok: snapshot.ok,
+            label: snapshot.label,
+            text: snapshot.text,
+            tooltip: snapshot.tooltip,
+            source: snapshot.source,
+            timezone: snapshot.timezone,
+            provider: snapshot.provider,
+            error: snapshot.error,
+        }
+    }
+}
+
+fn parse_snapshot_args() -> SnapshotArgs {
+    let mut parsed = SnapshotArgs::default();
+    let mut args = env::args().skip(1);
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--snapshot" => parsed.enabled = true,
+            "--json" => parsed.json = true,
+            "--local" => parsed.local = true,
+            "--timezone" | "--tz" => parsed.timezone = args.next(),
+            value if value.starts_with("--timezone=") => {
+                parsed.timezone = Some(value["--timezone=".len()..].to_string());
+            }
+            value if value.starts_with("--tz=") => {
+                parsed.timezone = Some(value["--tz=".len()..].to_string());
+            }
+            _ => {}
+        }
+    }
+
+    parsed
+}
+
+fn print_snapshot(output: &SnapshotOutput, json: bool) {
+    if json {
+        let json = serde_json::to_string(output)
+            .unwrap_or_else(|_| "{\"ok\":false,\"error\":\"snapshot serialize failed\"}".into());
+        println!("{}", json);
+    } else if output.ok {
+        println!("{}", output.text);
+    } else if let Some(error) = &output.error {
+        eprintln!("{}", error);
+    } else {
+        eprintln!("Clock error");
+    }
+}
+
+fn run_snapshot_mode(args: SnapshotArgs) -> i32 {
+    let config = Config::load_quiet();
+    let mut core = ClockCore::new(config.to_core_config());
+
+    let snapshot = if args.local {
+        Ok(core.switch_to_local())
+    } else if let Some(timezone) = args.timezone {
+        core.switch_to_timezone(timezone)
+    } else if let Some(timezone) = config.last_selected_timezone.clone() {
+        core.switch_to_timezone(timezone)
+    } else {
+        Ok(core.tick())
+    };
+
+    match snapshot {
+        Ok(snapshot) => {
+            let output = SnapshotOutput::from(snapshot);
+            let exit_code = if output.ok { 0 } else { 1 };
+            print_snapshot(&output, args.json);
+            exit_code
+        }
+        Err(error) => {
+            let output = SnapshotOutput::error(error);
+            print_snapshot(&output, args.json);
+            1
+        }
+    }
+}
 fn main() -> Result<()> {
+    let snapshot_args = parse_snapshot_args();
+    if snapshot_args.enabled {
+        std::process::exit(run_snapshot_mode(snapshot_args));
+    }
+
     println!("=== Minimal Clock v2.0 (Fallback Providers) ===");
 
     let config = Config::load();

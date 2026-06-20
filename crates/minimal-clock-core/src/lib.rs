@@ -6,7 +6,7 @@ use windows::{
     core::*, Win32::Networking::WinHttp::*, Win32::System::SystemInformation::GetLocalTime,
 };
 
-pub type ClockResult<T> = Result<T, String>;
+pub type ClockResult<T> = std::result::Result<T, String>;
 
 pub const DEFAULT_NETWORK_REFRESH_INTERVAL: Duration = Duration::from_secs(3600);
 
